@@ -8,7 +8,7 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
-CHAT = "🛡️ AI Security Chat"
+CHAT = "🛡️ AI Analyzer"
 
 
 def say(at, text):
@@ -94,4 +94,23 @@ def test_configurable_transfer_limit_ui(monkeypatch):
     at.sidebar.button[0].click().run()
     assert not at.exception
     assert at.session_state.account.limit == Decimal("7500.00")
+
+
+def test_chatbot_transfer_limit_flow(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.exception
+    at.sidebar.radio[0].set_value(CHAT).run()
+    say(at, "Change my transfer limit to 8500")
+    assert at.session_state.pending_limit == Decimal("8500")
+    assert at.session_state.account.limit == Decimal("5000")  # Not changed yet
+
+    # Find the limit confirmation PIN text input and submit button
+    pin_box = next((t for t in at.text_input if t.label == "Demo PIN"), None)
+    assert pin_box is not None
+    pin_box.set_value("4826")
+    next(b for b in at.button if b.label == "Authorize Limit Change").click().run()
+    assert not at.exception
+    assert at.session_state.account.limit == Decimal("8500")
+    assert at.session_state.pending_limit is None
 

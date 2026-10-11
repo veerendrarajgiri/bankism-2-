@@ -1,5 +1,6 @@
-"""Glue between the firewall, the audit log and the account. No Streamlit code here."""
+import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import List, Optional
 
 import config
@@ -10,12 +11,15 @@ from security import analyze_request, analyze_transfer_form
 from transaction_engine import BankAccount, PendingTransfer, TransferError, TransferResult
 
 
+
 @dataclass
 class ChatReply:
     text: str
     verdict: Verdict
     pending: Optional[PendingTransfer] = None
     candidates: List[Contact] = field(default_factory=list)
+    proposed_limit: Optional[Decimal] = None
+
 
 
 def _history_lines(account: BankAccount, n: int) -> str:
@@ -74,9 +78,48 @@ def _finish(logged_text: str, verdict: Verdict, account: BankAccount, audit: Aud
     return ChatReply(_compose(verdict, account, pending, err), verdict, pending, list(verdict.candidates))
 
 
+_LIMIT_CHANGE_RX = re.compile(
+    r"\b(?:change|set|update|increase|raise|lower|reduce|make)\b(?:\W+\w+){0,3}?\W+(?:limit|transfer\s+limit|transaction\s+limit)\b"
+    r"|(?:\b(?:limit|transfer\s+limit|transaction\s+limit)\s*(?:to|=|is)\s*)",
+    re.I
+)
+_NUM_CLEAN_RX = re.compile(r"[₹,]|(?:inr|rs\.?)", re.I)
+
+
+def _detect_limit_request(text: str) -> Optional[Decimal]:
+    if not isinstance(text, str):
+        return None
+    if not _LIMIT_CHANGE_RX.search(text):
+        return None
+    # Extract numerical candidate from the text
+    matches = re.findall(r"(?:₹|inr|rs\.?)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]{1,2})?)", text, re.I)
+    for m in matches:
+        cleaned = _NUM_CLEAN_RX.sub("", m).replace(",", "").strip()
+        try:
+            val = Decimal(cleaned)
+            if val.is_finite() and val > 0:
+                return val.quantize(Decimal("0.01"))
+        except (InvalidOperation, Exception):
+            continue
+    return None
+
+
 def handle_message(text, account: BankAccount, audit: AuditLog, llm=None) -> ChatReply:
     verdict = analyze_request(text, account.policy_context(), llm)
+    # Check if this is a request to adjust the transaction limit
+    if verdict.decision != Decision.BLOCK:
+        proposed = _detect_limit_request(text)
+        if proposed is not None:
+            msg = (
+                f"⚙️ **Transfer Limit Adjustment** — You requested to change your per-transfer limit to **{format_inr(proposed)}** "
+                f"(current limit is **{format_inr(account.limit)}**).\n\n"
+                "🛡️ To protect your account, limit modifications require explicit demo PIN verification. "
+                "Please enter the demo PIN below to authorize this change."
+            )
+            audit.record_analysis(text if isinstance(text, str) else repr(text)[:80], verdict)
+            return ChatReply(msg, verdict, None, [], proposed_limit=proposed)
     return _finish(text if isinstance(text, str) else repr(text)[:80], verdict, account, audit)
+
 
 
 def handle_transfer_form(contact_id, amount, memo, account: BankAccount, audit: AuditLog, llm=None,

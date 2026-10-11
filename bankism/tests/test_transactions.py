@@ -371,4 +371,19 @@ def test_command_center_metrics_match_actual_events(account, audit):
     assert m3["review"] == 1
 
 
+def test_chatbot_limit_change_proposal(account, audit):
+    # Propose limit change via chat
+    reply = handle_message("Please change my transfer limit to 8500", account, audit)
+    assert reply.proposed_limit == Decimal("8500.00")
+    assert "8,500.00" in reply.text
+    # Balance and limit untouched before confirmation
+    assert account.limit == Decimal("5000")
+
+    # Authorize with demo PIN
+    ok, msg, new_lim = account.set_transfer_limit(reply.proposed_limit, PIN)
+    assert ok
+    assert account.limit == Decimal("8500.00")
+
+
+
 
